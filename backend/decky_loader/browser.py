@@ -20,7 +20,7 @@ from typing import Dict, List, TypedDict
 # Local modules
 from .localplatform.localplatform import chown, chmod, get_chown_plugin_path
 from .loader import Loader, Plugins
-from .helpers import get_ssl_context, download_remote_binary_to_path
+from .helpers import get_ssl_context, download_remote_binary_to_path, get_loader_version
 from .enums import UserType
 from .settings import SettingsManager
 
@@ -171,6 +171,13 @@ class PluginBrowser:
                 self.loader.watcher.disabled = False
 
     async def _install(self, artifact: str, name: str, version: str, hash: str):
+        try:
+            await self._install_plugin(artifact, name, version, hash)
+        finally:
+            if self.loader.watcher:
+                self.loader.watcher.disabled = False
+
+    async def _install_plugin(self, artifact: str, name: str, version: str, hash: str):
         await self.loader.ws.emit("loader/plugin_download_start", name)
         await self.loader.ws.emit("loader/plugin_download_info", 5, "Store.download_progress_info.start")
         # Will be set later in code
@@ -222,7 +229,9 @@ class PluginBrowser:
                 case _: storeUrl = "https://plugins.deckbrew.xyz/plugins"
             logger.info(f"Incrementing installs for {name} from URL {storeUrl} (version {version})")
             async with ClientSession() as client:
-                res = await client.post(storeUrl+f"/{name}/versions/{version}/increment?isUpdate={isInstalled}", ssl=get_ssl_context())
+                res = await client.post(storeUrl+f"/{name}/versions/{version}/increment?isUpdate={isInstalled}", headers={
+                    "X-Decky-Version": get_loader_version()
+                }, ssl=get_ssl_context())
                 if res.status != 200:
                     logger.error(f"Server did not accept install count increment request. code: {res.status}")
 
@@ -253,6 +262,7 @@ class PluginBrowser:
                                 logger.warning(f"Nonexistent or invalid 'name' key value in {plugin_json_file}. Falling back to extracting from path.")
                     except Exception as e:
                         logger.error(f"Failed to read or parse {plugin_json_file}: {str(e)}. Falling back to extracting from path.")
+            isInstalled = self.find_plugin_folder(name) is not None
 
         # Check to make sure we got the file
         if res_zip is None:
@@ -265,6 +275,8 @@ class PluginBrowser:
             try:
                 logger.debug("Uninstalling existing plugin...")
                 await self.uninstall_plugin(name)
+                if self.loader.watcher:
+                    self.loader.watcher.disabled = True
             except:
                 logger.error(f"Plugin {name} could not be uninstalled.")
 
@@ -286,10 +298,13 @@ class PluginBrowser:
                     await self.loader.plugins[name].stop()
                     self.loader.plugins.pop(name, None)
                 await sleep(1)
-                if not isInstalled:
-                    current_plugin_order = self.settings.getSetting("pluginOrder")
-                    current_plugin_order.append(name)
-                    self.settings.setSetting("pluginOrder", current_plugin_order)
+                plugin_order = self.settings.getSetting("pluginOrder")
+                if name not in plugin_order:
+                    if name in current_plugin_order:
+                        plugin_order.insert(current_plugin_order.index(name), name)
+                    else:
+                        plugin_order.append(name)
+                    self.settings.setSetting("pluginOrder", plugin_order)
                     logger.debug("Plugin %s was added to the pluginOrder setting", name)
                 await self.loader.import_plugin(path.join(plugin_dir, "main.py"), plugin_folder)
             elif not chown_ret:
